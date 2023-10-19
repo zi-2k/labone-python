@@ -30,6 +30,7 @@ dependencies = [
   "numpy>=1.20",
   "pycapnp==2.0.0b1",
   "asyncio-atexit==1.0.1",
+  "unsync==1.4.0",
 ]
 
 [project.urls]
@@ -75,6 +76,7 @@ dependencies = [
   "ruff>=0.0.243",
   "numpy>=1.20",
   "asyncio-atexit==1.0.1",
+  "unsync==1.4.0",
 ]
 
 [tool.hatch.envs.lint.scripts]
