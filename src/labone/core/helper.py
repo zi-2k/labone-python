@@ -118,6 +118,8 @@ class VectorElementType(IntEnum):
             return cls.UINT32
         if np.issubdtype(numpy_type, np.uint64):
             return cls.UINT64
+        if np.issubdtype(numpy_type, np.int64):
+            return cls.UINT64
         if np.issubdtype(numpy_type, np.single):
             return cls.FLOAT
         if np.issubdtype(numpy_type, np.double):

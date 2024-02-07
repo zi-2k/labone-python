@@ -25,11 +25,12 @@ from labone.core.connection_layer import (
     ServerInfo,
     create_session_client_stream,
 )
-from labone.core.errors import LabOneCoreError, UnavailableError
 from labone.core.helper import (
     ensure_capnp_event_loop,
 )
-from labone.core.reflection.server import ReflectionServer
+from labone.core.hpk_schema import get_schema
+from labone.core.reflection.capnp_dynamic_type_system import build_type_system
+from labone.core.reflection.parsed_wire_schema import ParsedWireSchema
 from labone.core.session import Session
 
 if t.TYPE_CHECKING:
@@ -37,6 +38,24 @@ if t.TYPE_CHECKING:
         BadRequestError,
         InternalError,
     )
+
+SCHEMA = ParsedWireSchema(get_schema().theSchema)
+SESSION_SCHEMA_ID = 13390403837104530780
+
+
+class DummyReflection:
+    """Just a Dumy for a hotfix."""
+
+    def __init__(self):
+        self._parsed_schema = SCHEMA
+        build_type_system(self._parsed_schema.full_schema, self)
+
+
+REFLECTION = DummyReflection()
+INTERFACE = capnp.lib.capnp._InterfaceModule(  # noqa: SLF001
+    SCHEMA.full_schema[SESSION_SCHEMA_ID].schema.as_interface(),
+    SCHEMA.full_schema[SESSION_SCHEMA_ID].name,
+)
 
 
 class KernelSession(Session):
@@ -79,13 +98,16 @@ class KernelSession(Session):
 
     def __init__(
         self,
-        reflection_server: ReflectionServer,
+        connection: capnp.AsyncIoStream,
         kernel_info: KernelInfo,
         server_info: ServerInfo,
     ) -> None:
+        self.client = capnp.TwoPartyClient(connection)
+        capability = self.client.bootstrap().cast_as(INTERFACE)
+
         super().__init__(
-            reflection_server.session,  # type: ignore[attr-defined]
-            reflection_server=reflection_server,
+            capability,  # type: ignore[attr-defined]
+            reflection_server=REFLECTION,  # type: ignore[arg-type]
         )
         self._kernel_info = kernel_info
         self._server_info = server_info
@@ -129,20 +151,9 @@ class KernelSession(Session):
         )
         await ensure_capnp_event_loop()
         connection = await capnp.AsyncIoStream.create_connection(sock=sock)
-        try:
-            reflection_server = await ReflectionServer.create_from_connection(
-                connection,
-            )
-        except LabOneCoreError as e:
-            msg = str(
-                f"Unable to connect to the kernel at {kernel_info.name}"
-                f"{kernel_info.query} ({server_info.host}:"
-                f"{server_info.port}). (extended information: {e})",
-            )
-            raise UnavailableError(msg) from e
 
         session = KernelSession(
-            reflection_server=reflection_server,
+            connection=connection,
             kernel_info=kernel_info_extended,
             server_info=server_info_extended,
         )
