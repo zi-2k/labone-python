@@ -32,6 +32,7 @@ from typing_extensions import NotRequired, TypeAlias, TypedDict
 from labone.core import errors, result
 from labone.core.helper import (
     CapnpCapability,
+    CapnpLock,
     LabOneNodePath,
     request_field_type_description,
 )
@@ -159,6 +160,8 @@ class ListNodesFlags(IntFlag):
 
 async def _send_and_wait_request(
     request: capnp.lib.capnp._Request,
+    *,
+    capnp_lock: CapnpLock,
 ) -> capnp.lib.capnp._Response:
     """Send a request and wait for the response.
 
@@ -168,6 +171,7 @@ async def _send_and_wait_request(
 
     Args:
         request: Capnp request.
+        capnp_lock: Capnp lock.
 
     Returns:
         Successful response.
@@ -177,25 +181,26 @@ async def _send_and_wait_request(
         UnavailableError: If the server has not implemented the requested
             method.
     """
-    try:
-        return await request.send()
-    # TODO(markush): Raise more specific error types.  # noqa: TD003, FIX002
-    except capnp.lib.capnp.KjException as error:
-        if (
-            "Method not implemented" in error.description
-            or "object has no attribute" in error.description
-        ):
-            msg = str(
-                "The requested method is not implemented by the server. "
-                "This most likely that the LabOne version is outdated. "
-                "Please update the LabOne software to the latest version.",
-            )
-            raise errors.UnavailableError(msg) from None
-        msg = error.description
-        raise errors.LabOneCoreError(msg) from None
-    except Exception as error:  # noqa: BLE001
-        msg = str(error)
-        raise errors.LabOneCoreError(msg) from None
+    async with capnp_lock.lock():
+        try:
+            return await request.send()
+        # TODO(markush): Raise more specific error types.  # noqa: TD003, FIX002
+        except capnp.lib.capnp.KjException as error:
+            if (
+                "Method not implemented" in error.description
+                or "object has no attribute" in error.description
+            ):
+                msg = str(
+                    "The requested method is not implemented by the server. "
+                    "This most likely that the LabOne version is outdated. "
+                    "Please update the LabOne software to the latest version.",
+                )
+                raise errors.UnavailableError(msg) from None
+            msg = error.description
+            raise errors.LabOneCoreError(msg) from None
+        except Exception as error:  # noqa: BLE001
+            msg = str(error)
+            raise errors.LabOneCoreError(msg) from None
 
 
 def clean_exception_stack(func):
@@ -243,9 +248,11 @@ class Session:
         capnp_session: CapnpCapability,
         *,
         reflection_server: ReflectionServer,
+        capnp_lock: CapnpLock,
     ):
         self._reflection_server = reflection_server
         self._session = capnp_session
+        self._capnp_lock = capnp_lock
         # The reflection server might has enabled the automatic unwrapping
         # of the result. To allow both cases we check if the capnp_session
         # is wrapped and use the underlying capnp session instead.
@@ -272,7 +279,10 @@ class Session:
         """
         server_version = version.Version(
             (
-                await _send_and_wait_request(self._session.getSessionVersion_request())
+                await _send_and_wait_request(
+                    self._session.getSessionVersion_request(),
+                    capnp_lock=self._capnp_lock,
+                )
             ).version,
         )
         if server_version < Session.MIN_CAPABILITY_VERSION:
@@ -366,7 +376,7 @@ class Session:
         except (TypeError, ValueError):
             msg = "`flags` must be an integer."
             raise TypeError(msg) from None
-        response = await _send_and_wait_request(request)
+        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
         return list(response.paths)
 
     @clean_exception_stack
@@ -465,7 +475,7 @@ class Session:
         except (TypeError, ValueError):
             msg = "`flags` must be an integer."
             raise TypeError(msg) from None
-        response = await _send_and_wait_request(request)
+        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
         return json.loads(response.nodeProps)
 
     @clean_exception_stack
@@ -503,7 +513,7 @@ class Session:
             self._reflection_server.LookupMode.directLookup  # type: ignore[attr-defined]
         )
         request.client = self._client_id.bytes
-        response = await _send_and_wait_request(request)
+        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
         try:
             return AnnotatedValue.from_capnp(result.unwrap(response.result[0]))
         except IndexError as e:
@@ -553,7 +563,7 @@ class Session:
         request.value = capnp_value.value
         request.lookupMode = self._reflection_server.LookupMode.withExpansion  # type: ignore[attr-defined]
         request.client = self._client_id.bytes
-        response = await _send_and_wait_request(request)
+        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
         return [
             AnnotatedValue.from_capnp(result.unwrap(raw_result))
             for raw_result in response.result
@@ -602,7 +612,7 @@ class Session:
             raise TypeError(msg) from error
         request.lookupMode = self._reflection_server.LookupMode.directLookup  # type: ignore[attr-defined]
         request.client = self._client_id.bytes
-        response = await _send_and_wait_request(request)
+        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
         try:
             return AnnotatedValue.from_capnp(result.unwrap(response.result[0]))
         except IndexError as e:
@@ -662,7 +672,7 @@ class Session:
         request.lookupMode = self._reflection_server.LookupMode.withExpansion  # type: ignore[attr-defined]
         request.flags = int(flags)
         request.client = self._client_id.bytes
-        response = await _send_and_wait_request(request)
+        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
         return [
             AnnotatedValue.from_capnp(result.unwrap(raw_result))
             for raw_result in response.result
@@ -765,7 +775,7 @@ class Session:
 
         if get_initial_value:
             response, initial_value = await asyncio.gather(
-                _send_and_wait_request(request),
+                _send_and_wait_request(request, capnp_lock=self._capnp_lock),
                 self.get(path),
             )
             unwrap(response.result)  # Result(Void, Error)
@@ -776,7 +786,7 @@ class Session:
             )
             queue.put_nowait(initial_value)
             return queue
-        response = await _send_and_wait_request(request)
+        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
         unwrap(response.result)  # Result(Void, Error)
         new_queue_type = queue_type or DataQueue
         return new_queue_type(

@@ -6,13 +6,16 @@ within the core.
 
 import asyncio
 import logging
+import weakref
+from contextlib import asynccontextmanager
 from enum import IntEnum
-from functools import partial
 
 import asyncio_atexit  # type: ignore [import]
 import capnp
 import numpy as np
 from typing_extensions import TypeAlias
+
+from labone.core.errors import InternalError, UnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +25,67 @@ CapnpStructReader: TypeAlias = capnp.lib.capnp._DynamicStructReader  # noqa: SLF
 CapnpStructBuilder: TypeAlias = capnp.lib.capnp._DynamicStructBuilder  # noqa: SLF001
 
 
-async def tester(loop):
-    print("This should not be called except when python exits")
-    await loop.__aexit__(None, None, None)
+class CapnpLock:
+
+    def __init__(self):
+        self._active = True
+        self._lock = asyncio.Lock()
+
+    async def destroy(self):
+        self._active = False
+        await self._lock.acquire()
+
+    @asynccontextmanager
+    async def lock(self):
+        if not self._active:
+            msg = (
+                "The event loop in which this object was created is closed. "
+                "No further operations are possible."
+            )
+            raise UnavailableError(msg)
+        async with self._lock:
+            yield
+
+
+class LoopManager:
+
+    def __init__(self, loop):
+        self._locks = weakref.WeakSet()
+        self._loop = loop
+        self._active = True
+
+    @staticmethod
+    async def create():
+        if hasattr(asyncio.get_running_loop(), "_kj_loop"):
+            msg = "More than one capnp event loop is not supported."
+            raise InternalError(msg)
+
+        loop = capnp.kj_loop()
+        logger.debug("kj event loop attached to asyncio event loop %s", id(loop))
+        await loop.__aenter__()
+        manager = LoopManager(loop)
+        asyncio_atexit.register(manager.destroy)
+        return manager
+
+    async def destroy(self):
+        if not self._active:
+            return
+        self._active = False
+        for lock in self._locks:
+            await lock.destroy()
+        await self._loop.__aexit__(None, None, None)
+        delattr(asyncio.get_running_loop(), "_zi_loop_manager")
+
+    def create_lock(self):
+        if not self._active:
+            msg = (
+                "The event loop in which this object was created is closed. "
+                "No further operations are possible."
+            )
+            raise UnavailableError(msg)
+        lock = CapnpLock()
+        self._locks.add(lock)
+        return lock
 
 
 async def ensure_capnp_event_loop() -> None:
@@ -43,11 +104,17 @@ async def ensure_capnp_event_loop() -> None:
     # The context manager should only be entered once. To avoid entering
     # the context manager multiple times we check if the attribute is
     # already set.
-    if not hasattr(asyncio.get_running_loop(), "_kj_loop"):
-        loop = capnp.kj_loop()
-        logger.debug("kj event loop attached to asyncio event loop %s", id(loop))
-        await loop.__aenter__()
-        asyncio_atexit.register(partial(tester, loop))
+    loop = asyncio.get_running_loop()
+    if not hasattr(loop, "_zi_loop_manager"):
+        setattr(loop, "_zi_loop_manager", await LoopManager.create())  # noqa: B010
+
+
+async def create_lock() -> CapnpLock:
+    await ensure_capnp_event_loop()
+    return getattr(  # noqa: B009
+        asyncio.get_running_loop(),
+        "_zi_loop_manager",
+    ).create_lock()
 
 
 def request_field_type_description(
