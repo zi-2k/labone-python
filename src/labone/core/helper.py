@@ -70,6 +70,7 @@ class LoopManager:
     async def destroy(self):
         if not self._active:
             return
+        print("This should not be called except when python exits")
         self._active = False
         for lock in self._locks:
             await lock.destroy()
