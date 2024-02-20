@@ -22,6 +22,11 @@ CapnpStructReader: TypeAlias = capnp.lib.capnp._DynamicStructReader  # noqa: SLF
 CapnpStructBuilder: TypeAlias = capnp.lib.capnp._DynamicStructBuilder  # noqa: SLF001
 
 
+async def tester(loop):
+    print("This should not be called except when python exits")
+    await loop.__aexit__(None, None, None)
+
+
 async def ensure_capnp_event_loop() -> None:
     """Ensure that the capnp event loop is running.
 
@@ -42,7 +47,7 @@ async def ensure_capnp_event_loop() -> None:
         loop = capnp.kj_loop()
         logger.debug("kj event loop attached to asyncio event loop %s", id(loop))
         await loop.__aenter__()
-        asyncio_atexit.register(partial(loop.__aexit__, None, None, None))
+        asyncio_atexit.register(partial(tester, loop))
 
 
 def request_field_type_description(
