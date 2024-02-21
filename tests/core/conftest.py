@@ -1,4 +1,3 @@
-import asyncio
 from typing import Any
 
 import pytest
@@ -23,7 +22,6 @@ async def kj_loop():
     This helps to avoid leaking errors and promises from one test to another.
     """
     loop_manager = await LoopManager.create()
-    asyncio.get_running_loop()._zi_loop_manager = loop_manager
     yield
     await loop_manager.destroy()
 

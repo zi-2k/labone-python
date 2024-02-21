@@ -55,8 +55,22 @@ class LoopManager:
         self._active = True
 
     @staticmethod
+    async def exists() -> bool:
+        return hasattr(asyncio.get_running_loop(), "_zi_loop_manager")
+
+    @staticmethod
+    def get_running() -> "LoopManager":
+        return getattr(  # noqa: B009
+            asyncio.get_running_loop(),
+            "_zi_loop_manager",
+        )
+
+    @staticmethod
     async def create():
-        if hasattr(asyncio.get_running_loop(), "_kj_loop"):
+        if (
+            hasattr(asyncio.get_running_loop(), "_kj_loop")
+            or await LoopManager.exists()
+        ):
             msg = "More than one capnp event loop is not supported."
             raise InternalError(msg)
 
@@ -64,7 +78,11 @@ class LoopManager:
         logger.debug("kj event loop attached to asyncio event loop %s", id(loop))
         await loop.__aenter__()
         manager = LoopManager(loop)
-        asyncio_atexit.register(manager.destroy)
+        setattr(
+            asyncio.get_running_loop(),
+            "_zi_loop_manager",
+            manager,
+        )
         return manager
 
     async def destroy(self):
@@ -105,17 +123,13 @@ async def ensure_capnp_event_loop() -> None:
     # The context manager should only be entered once. To avoid entering
     # the context manager multiple times we check if the attribute is
     # already set.
-    loop = asyncio.get_running_loop()
-    if not hasattr(loop, "_zi_loop_manager"):
-        setattr(loop, "_zi_loop_manager", await LoopManager.create())  # noqa: B010
+    if not await LoopManager.exists():
+        asyncio_atexit.register((await LoopManager.create()).destroy)
 
 
 async def create_lock() -> CapnpLock:
     await ensure_capnp_event_loop()
-    return getattr(  # noqa: B009
-        asyncio.get_running_loop(),
-        "_zi_loop_manager",
-    ).create_lock()
+    return LoopManager.get_running().create_lock()
 
 
 def request_field_type_description(
