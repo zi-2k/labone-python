@@ -21,6 +21,7 @@ if t.TYPE_CHECKING:
 NormalizedPathSegment: TypeAlias = str
 PATH_SEPERATOR = "/"
 WILDCARD = "*"
+NUMBER_PLACEHOLDER = "N"
 
 T = t.TypeVar("T")
 

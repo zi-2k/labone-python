@@ -41,6 +41,7 @@ from labone.core.value import (
     AnnotatedValue,
     Value,
 )
+from labone.mock.convert_to_add_nodes import list_nodes_info_to_get_nodes
 from labone.mock.errors import LabOneMockError
 from labone.mock.session_mock_template import SessionMockFunctionality, Subscription
 from labone.node_info import NodeInfo
@@ -294,4 +295,9 @@ class AutomaticSessionFunctionality(SessionMockFunctionality):
         """
         self.memory[self._sanitize_path(subscription.path)].streaming_handles.append(
             subscription,
+        )
+
+    async def get_nodes(self):
+        return list_nodes_info_to_get_nodes(
+            await self.list_nodes_info("*"),
         )

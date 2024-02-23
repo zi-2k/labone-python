@@ -45,22 +45,6 @@ T = t.TypeVar("T")
 NUMBER_PLACEHOLDER = "N"
 
 
-class TimingTest:
-    def __init__(self, title) -> None:
-        self.title = title
-        self.start_time = 0
-
-    def __enter__(self):
-        self.start_time = time_ns()
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        print(f"{self.title}: {(time_ns()-self.start_time)/1000000} ms")
-
-
-def stringify_id(raw_id) -> str:
-    return "".join([hex(e)[-2:] for e in raw_id])
-
-
 class NodeProperty(Enum):
     READ = 1
     WRITE = 2
@@ -102,21 +86,6 @@ class NodeInfo2:
             options=options,
         )
 
-
-@dataclass
-class Range:
-    start: int
-    end: int
-
-
-def get_range(node_reader):
-    try:
-        return Range(node_reader.range.start, node_reader.range.end)
-    except KjException:
-        return None
-
-
-NodeId: TypeAlias = str
 
 
 def get_field_if_present(capnp_reader, field_name, else_value=None) -> None | t.Any:
@@ -218,7 +187,7 @@ class Segment:
     
     @property
     def info(self):
-        return self.capnp_struct.info#NodeInfo2.from_capnp(self.capnp_struct.info)
+        return self.capnp_struct.info
     
     @property
     def root(self):

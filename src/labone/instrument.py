@@ -65,7 +65,7 @@ class Instrument(PartialNode):
         self._serial = serial
         super().__init__(
             tree_manager=model_node.tree_manager,
-            path_segments=model_node.path_segments,
+            path_segments=model_node.abstract_path_segments,
             subtree_paths=model_node.subtree_paths,
         )
 
@@ -166,4 +166,4 @@ class Instrument(PartialNode):
     @property
     def kernel_session(self) -> KernelSession:
         """Kernel session used by the instrument."""
-        return self._tree_manager.session  # type: ignore[return-value]
+        return self._tree_data.session  # type: ignore[return-value]

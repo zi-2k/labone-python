@@ -8,6 +8,7 @@ NodeTreeManager, which is the interface to the server.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import typing as t
 import warnings
 from abc import ABC, abstractmethod
@@ -17,6 +18,7 @@ from deprecation import deprecated
 
 from labone.core.subscription import DataQueue
 from labone.core.value import AnnotatedValue, Value
+from labone.mock.convert_to_add_nodes import DynamicNestedStructure
 from labone.node_info import NodeInfo
 from labone.nodetree.errors import (
     LabOneInappropriateNodeTypeError,
@@ -24,6 +26,7 @@ from labone.nodetree.errors import (
     LabOneNotImplementedError,
 )
 from labone.nodetree.helper import (
+    NUMBER_PLACEHOLDER,
     WILDCARD,
     NestedDict,
     NormalizedPathSegment,
@@ -46,272 +49,44 @@ if t.TYPE_CHECKING:
 T = t.TypeVar("T")
 
 
-class NodeTreeManager:
-    """Managing relation of a node tree and its underlying session.
+@dataclass
+class TreeData:
+    session: Session
+    id_to_segment: dict[int, t.Any]
+    root_id: str
+    hide_kernel_prefix: bool
+    parser: t.Callable[[AnnotatedValue], AnnotatedValue]
 
-    Acts as a factory for nodes and holds the reference to the underlying
-    session. I holds a nested dictionary representing the structure of the
-    node tree.
+    def get_root(self, hide_kernel_prefix) -> Node:
+        capnp_struct=self.id_to_segment[self.root_id]
 
-    Args:
-        session: Session from which the node tree data is retrieved.
-        path_to_info: Result of former server-call, representing structure of
-            tree plus information about each node.
-        parser: Function, which is used to parse incoming values. It may do this
-            in a path-specific manner.
-        hide_kernel_prefix: Enter a trivial first path-segment automatically.
-                E.g. having the result of this function in a variable `tree`
-                `tree.debug.info` can be used instead of `tree.device1234.debug.info`.
-                Setting this option makes working with the tree easier.
-    """
-
-    def __init__(
-        self,
-        *,
-        session: Session,
-        path_to_info: dict[LabOneNodePath, NodeInfoType],
-        parser: t.Callable[[AnnotatedValue], AnnotatedValue],
-        hide_kernel_prefix: bool = True,
-    ):
-        self._session = session
-        self.path_to_info = path_to_info
-        self._parser = parser
-        self._hide_kernel_prefix = hide_kernel_prefix
-
-        self._remembered_nodes: dict[tuple[NormalizedPathSegment, ...], Node] = {}
-        self._cache_path_segments_to_node: (dict)[
-            tuple[int, tuple[NormalizedPathSegment, ...]],
-            Node,
-        ] = {}
-        self._cache_find_substructure: (dict)[
-            tuple[int, tuple[NormalizedPathSegment, ...]],
-            NestedDict[list[list[NormalizedPathSegment]] | dict],
-        ] = {}
-
-        self._root_prefix: tuple[str, ...] = ()
-        self._paths_as_segments: list[list[NormalizedPathSegment]] = []
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            self.add_nodes_with_info(path_to_info)
-
-    def add_nodes_with_info(
-        self,
-        path_to_info: dict[LabOneNodePath, NodeInfoType],
-    ) -> None:
-        """Add new nodes to the tree.
-
-        This function will not check that the added nodes are valid,
-        so it should be used with care. Normally, it is not necessary to
-        add nodes manually, because they will be acquired automatically
-        on construction.
-
-        Warning:
-            The root prefix may change, if the prefix was hidden before but is now not
-            unique any more. The access to the nodes in the tree may change.
-            This will trigger a warning.
-
-        Args:
-            path_to_info: Describing the new paths and the associated
-                information.
-        """
-        # dict prevents duplicates
-        self.path_to_info.update(path_to_info)
-
-        self._paths_as_segments = [split_path(path) for path in self.path_to_info]
-
-        # already explored structure is forgotten and will be re-explored on demand.
-        # this is necessary, because the new nodes might be in the middle of the tree
-        self._cache_find_substructure = {}
-
-        # type casting to allow assignment of more general type into the dict
-        self._partially_explored_structure: NestedDict[
-            list[list[NormalizedPathSegment]] | dict
-        ] = build_prefix_dict(
-            self._paths_as_segments,
-        )  # type: ignore[assignment]
-
-        # root prefix may change, if the prefix was hidden before but is now not
-        # unique any more
-        old_root_prefix = self._root_prefix
-        has_common_prefix = len(self._partially_explored_structure.keys()) == 1
-
-        if not self._hide_kernel_prefix or not has_common_prefix:
-            self._root_prefix = ()
-        else:
-            common_prefix = next(iter(self._partially_explored_structure.keys()))
-            self._root_prefix = (common_prefix,)
-
-        if self._root_prefix != old_root_prefix:
-            msg = (
-                f"Root prefix changed from '{join_path(old_root_prefix)}'"
-                f" to '{join_path(self._root_prefix)}'. "
-                f"This means in order to index the same node as before, "
-                f"use {'.'.join(['root',*old_root_prefix,'(...)'])} "
-                f"instead of {'.'.join(['root',*self._root_prefix,'(...)'])}."
+        if hide_kernel_prefix:
+            return Node.build(
+            tree_data=self,
+            capnp_struct=capnp_struct,
+            parametrization=[],
+            abstract_path_segments=(capnp_struct.name,),
+            is_wildcard=False,
             )
-            warnings.warn(msg, Warning, stacklevel=1)
 
-    def add_nodes(self, paths: list[LabOneNodePath]) -> None:
-        """Add new nodes to the tree.
+        abstract_capnp = DynamicNestedStructure()
+        abstract_capnp.name = ""
+        capnp_subnode = DynamicNestedStructure()
+        capnp_subnode.name = capnp_struct.name
+        capnp_subnode.id = capnp_struct.id
+        abstract_capnp.subNodes = [capnp_subnode]
 
-        This function will not check that the added nodes are valid,
-        so it should be used with care. Normally, it is not necessary to
-        add nodes manually, because they will be acquired automatically
-        on construction.
-
-        Warning:
-            The root prefix may change, if the prefix was hidden before but is now not
-            unique any more. The access to the nodes in the tree may change.
-            This will trigger a warning.
-
-        Args:
-            paths: Paths of the new nodes.
-        """
-        self.add_nodes_with_info(
-            {p: NodeInfo.plain_default_info(path=p) for p in paths},
-        )
-
-    def find_substructure(
-        self,
-        path_segments: tuple[NormalizedPathSegment, ...],
-    ) -> NestedDict[list[list[NormalizedPathSegment]] | dict]:
-        """Find children and explore the node structure lazily as needed.
-
-        This function must be used by all nodes to find their children.
-        This ensures efficient caching of the structure and avoids
-        unnecessary lookups.
-
-        Args:
-            path_segments: Segments describing the path, for which the children
-                should be found.
-
-        Returns:
-            Nested dictionary, representing the structure of the children.
-
-        Raises:
-            LabOneInvalidPathError: If the path segments are invalid.
-        """
-        unique_value = (hash(self), path_segments)
-        if unique_value in self._cache_find_substructure:
-            return self._cache_find_substructure[unique_value]
-
-        # base case
-        if not path_segments:
-            # this is not worth adding to the cache, so just return it
-            return self._partially_explored_structure
-
-        # solving recursively, taking advantage of caching
-        # makes usual indexing of lower nodes O(1)
-        sub_solution = self.find_substructure(path_segments[:-1])
-        segment = path_segments[-1]
-
-        try:
-            sub_solution[segment]
-        except KeyError as e:
-            if segment == WILDCARD:
-                msg = (
-                    f"Cannot find structure for a path containing a wildcard,"
-                    f"however, `find_structure` was called with "
-                    f"{join_path(path_segments)}"
-                )
-                raise LabOneInvalidPathError(msg) from e
-
-            msg = (
-                f"Path '{join_path(path_segments)}' is illegal, because '{segment}' "
-                f"is not a viable extension of '{join_path(path_segments[:-1])}'. "
-                f"It does not correspond to any existing node."
-                f"\nViable extensions would be {list(sub_solution.keys())}"
+        return Node.build(
+            tree_data=self, 
+            capnp_struct=abstract_capnp,
+            parametrization=[],
+            abstract_path_segments=(),
+            is_wildcard=False,
             )
-            raise LabOneInvalidPathError(msg) from e
-
-        # explore structure deeper on demand
-        # the path not being cached implies this is the first time
-        # this substructure is explored.
-        # So we know it is a list of paths, which we now build into a prefix dict.
-        sub_solution[segment] = build_prefix_dict(
-            sub_solution[segment],  # type: ignore[arg-type]
-        )
-
-        result: NestedDict[list[list[NormalizedPathSegment]] | dict] = sub_solution[
-            segment
-        ]  # type: ignore[assignment]
-        self._cache_find_substructure[unique_value] = result
-        return result
-
-    def raw_path_to_node(
-        self,
-        path: LabOneNodePath,
-    ) -> Node:
-        """Convert a LabOne node path into a node object.
-
-        Caches node-objects and enforces thereby a singleton pattern.
-        Only one node-object per path.
-
-        Args:
-            path: Path, for which a node object should be provided.
-
-        Returns:
-            Node-object corresponding to the path.
-
-        Raises:
-            LabOneInvalidPathError:
-                In no subtree_paths are given and the path is invalid.
-        """
-        return self.path_segments_to_node(tuple(split_path(path)))
-
-    def path_segments_to_node(
-        self,
-        path_segments: tuple[NormalizedPathSegment, ...],
-    ) -> Node:
-        """Convert a tuple of path-segments into a node object.
-
-        Caches node-objects and enforces thereby a singleton pattern.
-        Only one node-object per path.
-
-        Args:
-            path_segments: Segments describing the path, for which a node object
-                should be provided.
-
-        Returns:
-            Node-object corresponding to the path.
-
-        Raises:
-            LabOneInvalidPathError: In no subtree_paths are given and the path
-                is invalid.
-        """
-        unique_value = (hash(self), path_segments)
-        if unique_value in self._cache_path_segments_to_node:
-            return self._cache_path_segments_to_node[unique_value]
-
-        result = Node.build(tree_manager=self, path_segments=path_segments)
-        self._cache_path_segments_to_node[unique_value] = result
-        return result
-
-    def __hash__(self) -> int:
-        return id(self)
-
+    
     @property
-    def parser(self) -> t.Callable[[AnnotatedValue], AnnotatedValue]:
-        """Parser for values received from the server."""
-        return self._parser
-
-    @property
-    def session(self) -> Session:
-        """Underlying Session to the server."""
-        return self._session
-
-    @property
-    def root(self) -> Node:
-        """Create the root-node of the tree.
-
-        Depending on the hide_kelnel_prefix-setting of the
-        NodeTreeManager, the root will either be '/' or
-        the directly entered device, like '/dev1234'
-
-        Returns:
-            Root-node of the tree.
-        """
-        return self.path_segments_to_node(self._root_prefix)
+    def root(self):
+        return self.get_root(hide_kernel_prefix=self.hide_kernel_prefix)
 
 
 class MetaNode(ABC):
@@ -332,16 +107,15 @@ class MetaNode(ABC):
 
     def __init__(
         self,
-        *,
-        tree_manager: NodeTreeManager,
-        path_segments: tuple[NormalizedPathSegment, ...],
-        subtree_paths: (
-            NestedDict[list[list[NormalizedPathSegment]] | dict] | UndefinedStructure
-        ),
-    ):
-        self._tree_manager = tree_manager
-        self._path_segments = path_segments
-        self._subtree_paths = subtree_paths
+        tree_data: TreeData,
+        capnp_struct,
+        parametrization: list[int],
+        abstract_path_segments: tuple[NormalizedPathSegment, ...],
+    ) -> None:
+        self._tree_data = tree_data
+        self.capnp_struct = capnp_struct
+        self.parametrization = parametrization
+        self._abstract_path_segments = abstract_path_segments
 
     @abstractmethod
     def __getattr__(self, next_segment: str) -> MetaNode | AnnotatedValue:
@@ -417,6 +191,84 @@ class MetaNode(ABC):
         """
         ...
 
+    def try_generate_subnode(
+        self,
+        next_path_segment: NormalizedPathSegment,
+    ) -> Node:
+        """Provides nodes for the extended path or the original values for leafs.
+
+        Will fail if the resulting Path is ill-formed.
+
+        Args:
+            next_path_segment: Segment, with which the current path should be
+            extended.
+
+        Returns:
+            New node-object, representing the extended path, or plain value,
+            if came to a leaf-node.
+
+        Raises:
+            LabOneInvalidPathError: If the extension leads to an invalid path.
+
+        """
+        if next_path_segment == WILDCARD:
+            return WildcardNode(
+                tree_data=self.tree_data,
+                capnp_struct=self.capnp_struct,
+                parametrization=self.parametrization,
+                abstract_path_segments=(*self.abstract_path_segments,WILDCARD),
+            )
+        
+        if next_path_segment.isnumeric():
+            nr = int(next_path_segment)
+            if  nr < 0 and nr > sub_capnp.rangeEnd:
+                msg = (
+                    f"Path '{join_path((*self.path_segments, next_path_segment))}' is illegal, because '{next_path_segment}' "
+                    f"is not a viable extension of '{join_path(self.path_segments)}'. "
+                    f"Only the indeces between 0 and {sub_capnp.rangeEnd} exist."
+                )
+                raise LabOneInvalidPathError(msg) from e
+
+            try:
+                sub_id = self.segment_to_subnode[NUMBER_PLACEHOLDER]
+            except KeyError as e:
+                msg = (
+                    f"Path '{join_path((*self.path_segments, next_path_segment))}' is illegal, because '{next_path_segment}' "
+                    f"is not indexable. "
+                    f"\nViable extensions would be {list(self.segment_to_subnode.keys())}"
+                )
+                raise LabOneInvalidPathError(msg) from e
+
+            sub_capnp = self.tree_data.id_to_segment[sub_id]
+            new_parametrization = self.parametrization.copy()
+            new_parametrization.append(nr)
+            return Node.build(
+                tree_data=self.tree_data,
+                capnp_struct=sub_capnp,
+                parametrization=new_parametrization,
+                abstract_path_segments=(*self.path_segments,sub_capnp.name),
+                is_wildcard=False,
+            )
+
+        try:
+            sub_id = self.segment_to_subnode[next_path_segment]
+        except KeyError as e:
+            msg = (
+                f"Path '{join_path((*self.path_segments, next_path_segment))}' is illegal, because '{next_path_segment}' "
+                f"is not a viable extension of '{join_path(self.path_segments)}'. "
+                f"It does not correspond to any existing node."
+                f"\nViable extensions would be {list(self.segment_to_subnode.keys())}"
+            )
+            raise LabOneInvalidPathError(msg) from e
+        sub_capnp = self.tree_data.id_to_segment[sub_id]
+        return Node.build(
+            tree_data=self.tree_data,
+            capnp_struct=sub_capnp,
+            parametrization=self.parametrization.copy(),
+            abstract_path_segments=(*self.path_segments,sub_capnp.name),
+            is_wildcard=False,
+        )
+
     def __iter__(self) -> t.Iterator[MetaNode | AnnotatedValue]:
         """Iterating through direct sub-nodes.
 
@@ -427,12 +279,12 @@ class MetaNode(ABC):
         Returns:
             Sub-nodes iterator.
         """
-        for segment in sorted(self._subtree_paths.keys()):
+        for segment in sorted(self.segment_to_subnode.keys()):
             yield self[segment]
 
     def __len__(self) -> int:
         """Number of direct sub-nodes."""
-        return len(self._subtree_paths.keys())
+        return len(self.segment_to_subnode)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self!s})"
@@ -448,6 +300,11 @@ class MetaNode(ABC):
             )  # pragma: no cover
             raise TypeError(msg)  # pragma: no cover
         return self.path < other.path
+
+    @property
+    def children(self) -> list[str]:
+        """List of direct sub-node names."""
+        return [pythonify_path_segment(p) for p in self.segment_to_subnode]
 
     def is_child_node(
         self,
@@ -473,41 +330,66 @@ class MetaNode(ABC):
         return (
             len(path_segments) == len(self.path_segments) + 1
             and path_segments[: len(self.path_segments)] == self.path_segments
-            and path_segments[-1] in self._subtree_paths
+            and path_segments[-1] in self.segment_to_subnode
         )
 
     @property
-    def tree_manager(self) -> NodeTreeManager:
+    def tree_data(self) -> TreeData:
         """Get interface managing the node-tree and the corresponding session."""
-        return self._tree_manager
-
+        return self._tree_data
+    
+    @property#@cached_property
+    def segment_to_subnode(self):
+        return {e.name: e.id for e in self.capnp_struct.subNodes}
+    
     @property
     def path(self) -> LabOneNodePath:
-        """The LabOne node path, this node corresponds to."""
-        return join_path(self._path_segments)
-
+        return join_path(self.path_segments_generator)
+    
     @property
     def path_segments(self) -> tuple[NormalizedPathSegment, ...]:
-        """The underlying segments of the path, this node corresponds to."""
-        return self._path_segments
+        return tuple(self.path_segments_generator)
+    
+    @property#@cached_property
+    def path_segments_generator(self) -> t.Iterator[NormalizedPathSegment]:
+        """Fill parametrization into the path segments."""
+        parameter_index = 0
+        for segment in self.abstract_path_segments:
+            if segment == NUMBER_PLACEHOLDER:
+                yield str(self.parametrization[parameter_index])
+                parameter_index += 1
+            else:
+                yield segment
 
     @property
-    @deprecated(details="use 'path_segments' instead.")
-    def raw_tree(self) -> tuple[NormalizedPathSegment, ...]:
-        """The underlying segments of the path, this node corresponds to."""
-        return self.path_segments
+    def abstract_path_segments(self) -> tuple[NormalizedPathSegment, ...]:
+        return self._abstract_path_segments
+    
+    @abstract_path_segments.setter
+    def abstract_path_segments(self, value: tuple[NormalizedPathSegment, ...]) -> None:
+        self._abstract_path_segments = value
 
-    @property
-    def subtree_paths(
-        self,
-    ) -> NestedDict[list[list[NormalizedPathSegment]] | dict] | UndefinedStructure:
-        """Structure defining which sub-nodes exist."""
-        return self._subtree_paths
+    def __dir__(self) -> t.Iterable[str]:
+        """Show valid subtree-extensions in hints.
 
+        Returns:
+            Iterator of valid dot-access identifier.
+
+        """
+        return self.children + list(super().__dir__())
+    
     @property
-    def children(self) -> list[str]:
-        """List of direct sub-node names."""
-        return [pythonify_path_segment(p) for p in self._subtree_paths]
+    def root(self):
+        """Providing root node.
+
+        Depending on the hide_kelnel_prefix-setting of the
+        NodeTreeManager, the root will either be '/' or
+        the directly entered device, like '/dev1234'
+
+        Returns:
+            Root of the tree structure, this node is part of.
+        """
+        return self.tree_data.root
 
 
 class ResultNode(MetaNode):
@@ -538,16 +420,18 @@ class ResultNode(MetaNode):
 
     def __init__(  # noqa: PLR0913
         self,
-        tree_manager: NodeTreeManager,
-        path_segments: tuple[NormalizedPathSegment, ...],
-        subtree_paths: NestedDict[list[list[NormalizedPathSegment]] | dict],
+        tree_data: TreeData,
+        capnp_struct,
+        parametrization: list[int],
+        abstract_path_segments: tuple[NormalizedPathSegment, ...],
         value_structure: TreeProp,
         timestamp: int,
     ):
         super().__init__(
-            tree_manager=tree_manager,
-            path_segments=path_segments,
-            subtree_paths=subtree_paths,
+            tree_data=tree_data,
+            capnp_struct=capnp_struct,
+            parametrization=parametrization,
+            abstract_path_segments=abstract_path_segments,
         )
         self._value_structure = value_structure
         self._timestamp = timestamp
@@ -562,7 +446,7 @@ class ResultNode(MetaNode):
             New node-object, representing the extended path, or plain value,
             if came to a leaf-node.
         """
-        return self.try_generate_subnode(normalize_path_segment(next_segment))
+        return self.try_generate_subnode_result(normalize_path_segment(next_segment))
 
     def __getitem__(self, path_extension: str | int) -> ResultNode | AnnotatedValue:
         """Go one or multiple levels deeper into the tree structure.
@@ -598,28 +482,19 @@ class ResultNode(MetaNode):
         current_node = self
         try:
             for path_segment in relative_path_segments:
-                current_node = current_node.try_generate_subnode(
+                current_node = current_node.try_generate_subnode_result(
                     normalize_path_segment(path_segment),
                 )  # type: ignore[assignment]
 
         except AttributeError as e:
             msg = (
-                f"Path {join_path((*self.path_segments,*relative_path_segments))} "
+                f"Path {join_path((*self.abstract_path_segments,*relative_path_segments))} "
                 f"is invalid, because {current_node.path} "
                 f"is already a leaf-node."
             )
             raise LabOneInvalidPathError(msg) from e
 
         return current_node
-
-    def __dir__(self) -> t.Iterable[str]:
-        """Show valid subtree-extensions in hints.
-
-        Returns:
-            Iterator of valid dot-access identifier.
-
-        """
-        return self.children + list(super().__dir__())
 
     def __contains__(self, item: str | int | ResultNode | AnnotatedValue) -> bool:
         """Checks if a path-segment or node is an immediate sub-node of this one."""
@@ -656,7 +531,7 @@ class ResultNode(MetaNode):
         )
 
     def __repr__(self) -> str:
-        return f"{self!s} -> {[str(k) for k in self._subtree_paths]}"
+        return f"{self!s}"
 
     def results(self) -> t.Iterator[AnnotatedValue]:
         """Iterating through all results.
@@ -672,7 +547,7 @@ class ResultNode(MetaNode):
             if path.startswith(self.path):
                 yield value
 
-    def try_generate_subnode(
+    def try_generate_subnode_result(
         self,
         next_path_segment: NormalizedPathSegment,
     ) -> ResultNode | AnnotatedValue:
@@ -692,50 +567,28 @@ class ResultNode(MetaNode):
             LabOneInvalidPathError: If the extension leads to an invalid path or if it
                 is tried to use wildcards in ResultNodes.
         """
-        extended_path = (*self._path_segments, next_path_segment)
-        try:
-            next_subtree = self.subtree_paths[next_path_segment]
-        except KeyError as e:
-            if next_path_segment == WILDCARD:
-                msg = (
+        if next_path_segment == WILDCARD:
+            msg = (
                     f"Wildcards '*' are not allowed in a tree representing "
                     f"measurement results. However, it was tried to extend {self.path} "
                     f"with a wildcard."
                 )
-                raise LabOneInvalidPathError(msg) from e
-
-            # this call checks whether the path is in the nodetree itself
-            # if this is not the case, this line will raise the appropriate error
-            # otherwise, the path is in the tree, but not captured in this particular
-            # result node.
-            self.tree_manager.find_substructure(extended_path)
-
-            msg = (
-                f"Path '{join_path(extended_path)}' is not captured in this "
-                "result node. It corresponds to an existing node, but the "
-                "request producing this result collection was make such that "
-                "this result is not included. Change either the request or "
-                "access a different node."
-            )
             raise LabOneInvalidPathError(msg) from e
+        
+        sub_node = self.try_generate_subnode(next_path_segment)
 
-        # exploring deeper tree stucture if it is not aleady known
-        if isinstance(next_subtree, list):  # pragma: no cover
-            next_subtree = build_prefix_dict(next_subtree)
-
-        deeper_node = ResultNode(
-            tree_manager=self.tree_manager,
-            path_segments=extended_path,
-            subtree_paths=next_subtree,  # type: ignore[arg-type]
-            value_structure=self._value_structure,
-            timestamp=self._timestamp,
-        )
-
-        if not next_subtree:
-            # give value instead of subnode if already at a leaf
-            # generate hypothetical node in order to apply normal behavior
-            return self._value_structure[deeper_node.path]
-        return deeper_node
+        if sub_node.children:
+            return ResultNode(
+                tree_data=self.tree_data,
+                capnp_struct=sub_node.capnp_struct,
+                parametrization=sub_node.parametrization,
+                abstract_path_segments=(*sub_node.path_segments, sub_node.capnp_struct.name),
+                value_structure=self._value_structure,
+                timestamp=self._timestamp,
+            )
+        
+        # plain result for leafs
+        return self._value_structure[sub_node.path]
 
 
 class Node(MetaNode, ABC):
@@ -761,6 +614,35 @@ class Node(MetaNode, ABC):
     changes in the node. For more information on the subscription functionality
     see the documentation of the `subscribe` function or the `DataQueue` class.
     """
+
+    def build(
+            tree_data: TreeData,
+        capnp_struct,
+        parametrization: list[int],
+        abstract_path_segments: tuple[NormalizedPathSegment, ...],
+        is_wildcard: bool,
+        ) -> WildcardOrPartialNode:
+        if is_wildcard:
+            return WildcardNode(
+                tree_data=tree_data,
+                capnp_struct=capnp_struct,
+                parametrization=parametrization,
+                abstract_path_segments=abstract_path_segments,
+            )
+
+        if capnp_struct.subNodes:
+            return PartialNode(
+                tree_data=tree_data,
+                capnp_struct=capnp_struct,
+                parametrization=parametrization,
+                abstract_path_segments=abstract_path_segments,
+            )
+        return LeafNode(
+            tree_data=tree_data,
+            capnp_struct=capnp_struct,
+            parametrization=parametrization,
+            abstract_path_segments=abstract_path_segments,
+        )
 
     def __getattr__(self, next_segment: str) -> Node:
         """Access sub-node.
@@ -845,20 +727,11 @@ class Node(MetaNode, ABC):
         return (
             other.__class__ == self.__class__
             and self.path_segments == other.path_segments  # type:ignore[attr-defined]
-            and self.tree_manager == other.tree_manager  # type:ignore[attr-defined]
+            and self.tree_data == other.tree_data  # type:ignore[attr-defined]
         )
 
     def __hash__(self) -> int:
-        return hash((self.path, hash(self.__class__), hash(self._tree_manager)))
-
-    def __dir__(self) -> t.Iterable[str]:
-        """Show valid subtree-extensions in hints.
-
-        Returns:
-            Iterator of valid dot-access identifier.
-
-        """
-        return self.children + list(super().__dir__())
+        return hash((self.path, hash(self.__class__), hash(self._tree_data)))
 
     def __contains__(self, item: str | int | Node) -> bool:
         """Checks if a path-segment or node is an immediate sub-node of this one.
@@ -883,7 +756,7 @@ class Node(MetaNode, ABC):
         """
         if isinstance(item, Node):
             return self.is_child_node(item)
-        return normalize_path_segment(item) in self._subtree_paths
+        return normalize_path_segment(item) in self.segment_to_subnode
 
     async def __call__(
         self,
@@ -926,73 +799,6 @@ class Node(MetaNode, ABC):
         self,
         value: Value,
     ) -> AnnotatedValue | ResultNode:
-        ...
-
-    @classmethod
-    def build(
-        cls,
-        *,
-        tree_manager: NodeTreeManager,
-        path_segments: tuple[NormalizedPathSegment, ...],
-    ) -> Node:
-        """Construct a matching subnode.
-
-        Useful for creating a node, not necessarily knowing what kind of node it
-        should be. This factory method will choose the correct one.
-
-        Args:
-            tree_manager: Interface managing the node-tree and the corresponding
-                session.
-            path_segments: A tuple describing the path.
-
-        Returns:
-            A node of the appropriate type.
-        """
-        contains_wildcards = any(segment == WILDCARD for segment in path_segments)
-        if contains_wildcards:
-            subtree_paths: (
-                NestedDict[list[list[NormalizedPathSegment]] | dict]
-                | UndefinedStructure
-            ) = UndefinedStructure()
-        else:
-            subtree_paths = tree_manager.find_substructure(path_segments)
-
-        is_leaf = not bool(subtree_paths)
-
-        if contains_wildcards:
-            return WildcardNode(
-                tree_manager=tree_manager,
-                path_segments=path_segments,
-                subtree_paths=subtree_paths,
-            )
-
-        if is_leaf:
-            return LeafNode(
-                tree_manager=tree_manager,
-                path_segments=path_segments,
-                subtree_paths=subtree_paths,
-            )
-
-        return PartialNode(
-            tree_manager=tree_manager,
-            path_segments=path_segments,
-            subtree_paths=subtree_paths,
-        )
-
-    @abstractmethod
-    def try_generate_subnode(
-        self,
-        next_path_segment: NormalizedPathSegment,
-    ) -> Node:
-        """Provides nodes for the extended path or the original values for leafs.
-
-        Args:
-            next_path_segment: Segment, with which the current path should be extended.
-
-        Returns:
-            New node-object, representing the extended path.
-
-        """
         ...
 
     @abstractmethod
@@ -1072,18 +878,6 @@ class Node(MetaNode, ABC):
             flexible manner.
         """
 
-    @property
-    def root(self) -> Node:
-        """Providing root node.
-
-        Depending on the hide_kelnel_prefix-setting of the
-        NodeTreeManager, the root will either be '/' or
-        the directly entered device, like '/dev1234'
-
-        Returns:
-            Root of the tree structure, this node is part of.
-        """
-        return self.tree_manager.root
 
 
 class LeafNode(Node):
@@ -1104,8 +898,8 @@ class LeafNode(Node):
             LabOneCoreError: If something else went wrong that can not be
                 mapped to one of the other errors.
         """
-        return self._tree_manager.parser(
-            await self._tree_manager.session.get(self.path),
+        return self._tree_data.parser(
+            await self._tree_data.session.get(self.path),
         )
 
     async def _set(
@@ -1129,8 +923,8 @@ class LeafNode(Node):
             LabOneCoreError: If something else went wrong that can not be
                 mapped to one of the other errors.
         """
-        return self._tree_manager.parser(
-            await self._tree_manager.session.set(
+        return self._tree_data.parser(
+            await self._tree_data.session.set(
                 AnnotatedValue(value=value, path=self.path),
             ),
         )
@@ -1210,9 +1004,9 @@ class LeafNode(Node):
             A DataQueue, which can be used to receive any changes to the node in a
             flexible manner.
         """
-        return await self._tree_manager.session.subscribe(
+        return await self._tree_data.session.subscribe(
             self.path,
-            parser_callback=self._tree_manager.parser,
+            parser_callback=self._tree_data.parser,
             queue_type=queue_type or DataQueue,
             get_initial_value=get_initial_value,
         )
@@ -1235,7 +1029,7 @@ class LeafNode(Node):
                 any value except the passed value. (default = False)
                 Useful when waiting for value to change from existing one.
         """
-        await self._tree_manager.session.wait_for_state_change(
+        await self._tree_data.session.wait_for_state_change(
             self.path,
             value,
             invert=invert,
@@ -1244,7 +1038,7 @@ class LeafNode(Node):
     @cached_property
     def node_info(self) -> NodeInfo:
         """Additional information about the node."""
-        return NodeInfo(self.tree_manager.path_to_info[self.path])
+        return self.capnp_struct.info # todo
 
 
 class WildcardOrPartialNode(Node, ABC):
@@ -1265,7 +1059,7 @@ class WildcardOrPartialNode(Node, ABC):
                 mapped to one of the other errors.
         """
         return self._package_response(
-            await self._tree_manager.session.get_with_expression(self.path),
+            await self._tree_data.session.get_with_expression(self.path),
         )
 
     async def _set(
@@ -1287,7 +1081,7 @@ class WildcardOrPartialNode(Node, ABC):
                 mapped to one of the other errors.
         """
         return self._package_response(
-            await self._tree_manager.session.set_with_expression(
+            await self._tree_data.session.set_with_expression(
                 AnnotatedValue(value=value, path=self.path),
             ),
         )
@@ -1313,31 +1107,25 @@ class WildcardOrPartialNode(Node, ABC):
             Node-structure, representing the results.
         """
         timestamp = raw_response[0].timestamp if raw_response else None
-        path_segments = (
-            self.tree_manager.root.path_segments
-        )  # same starting point as root
 
         # replace values by enum values and parse if applicable
-        raw_response = [self._tree_manager.parser(r) for r in raw_response]
+        raw_response = [self._tree_data.parser(r) for r in raw_response]
 
         # package into dict
         response_dict = {
             annotated_value.path: annotated_value for annotated_value in raw_response
         }
 
-        subtree_paths = build_prefix_dict(
-            [
-                split_path(ann.path)[len(path_segments) :]  # suffix after root path
-                for ann in raw_response
-            ],
-        )
+        # same starting point as root
+        model_node = self.tree_data.root
 
         return ResultNode(
-            tree_manager=self.tree_manager,
-            path_segments=path_segments,
-            subtree_paths=subtree_paths,  # type: ignore[arg-type]
+            tree_data=model_node.tree_data,
+            capnp_struct=model_node.capnp_struct,
+            parametrization=model_node.parametrization,
+            abstract_path_segments=model_node.abstract_path_segments, 
             value_structure=response_dict,
-            timestamp=timestamp if timestamp else 0,
+            timestamp=timestamp,
         )
 
     @t.overload
@@ -1422,8 +1210,12 @@ class WildcardNode(WildcardOrPartialNode):
             New node-object, representing the extended path.
 
         """
-        extended_path = (*self._path_segments, next_path_segment)
-        return self._tree_manager.path_segments_to_node(extended_path)
+        return WildcardNode(
+            tree_data=self.tree_data,
+            capnp_struct=self.capnp_struct, # todo: wildcard has kein capnp struct, oder? Schauen dass alles klappt was das bruacht
+            parametrization=self.parametrization,
+            abstract_path_segments=(*self.abstract_path_segments, next_path_segment),
+        )
 
     async def wait_for_state_change(
         self,
@@ -1445,8 +1237,8 @@ class WildcardNode(WildcardOrPartialNode):
         """
         # find paths corresponding to this wildcard-path and put them into nodes
         resolved_nodes = [
-            self.tree_manager.raw_path_to_node(path)
-            for path in await self.tree_manager.session.list_nodes(self.path)
+            self.tree_data.get_root(hide_kernel_prefix=False)[path]
+            for path in await self.tree_data.session.list_nodes(self.path)
         ]
         await asyncio.gather(
             *[
@@ -1458,39 +1250,6 @@ class WildcardNode(WildcardOrPartialNode):
 
 class PartialNode(WildcardOrPartialNode):
     """Node corresponding to a path, which has not reached a leaf yet."""
-
-    def try_generate_subnode(
-        self,
-        next_path_segment: NormalizedPathSegment,
-    ) -> Node:
-        """Provides nodes for the extended path or the original values for leafs.
-
-        Will fail if the resulting Path is ill-formed.
-
-        Args:
-            next_path_segment: Segment, with which the current path should be
-            extended.
-
-        Returns:
-            New node-object, representing the extended path, or plain value,
-            if came to a leaf-node.
-
-        Raises:
-            LabOneInvalidPathError: If the extension leads to an invalid path.
-
-        """
-        extended_path = (*self._path_segments, next_path_segment)
-
-        # first try to extend the path. Will fail if the resulting path is invalid
-        try:
-            self.tree_manager.find_substructure(extended_path)
-        except LabOneInvalidPathError:
-            # wildcards are always legal
-            if next_path_segment == WILDCARD:
-                return self._tree_manager.path_segments_to_node(extended_path)
-            raise
-
-        return self._tree_manager.path_segments_to_node(extended_path)
 
     async def wait_for_state_change(
         self,

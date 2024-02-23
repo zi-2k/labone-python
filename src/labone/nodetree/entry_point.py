@@ -6,9 +6,10 @@ This module provides a function to construct a node tree from a session.
 from __future__ import annotations
 
 import typing as t
+from labone.mock.convert_to_add_nodes import DynamicNestedStructure
 
 from labone.nodetree.enum import get_default_enum_parser
-from labone.nodetree.node import NodeTreeManager
+from labone.nodetree.node import PartialNode, TreeData
 
 if t.TYPE_CHECKING:
     from labone.core import AnnotatedValue
@@ -41,19 +42,38 @@ async def construct_nodetree(
     Returns:
         Root-node of the tree.
     """
-    path_to_info = await session.list_nodes_info("*")
+    # path_to_info = await session.list_nodes_info("*")
 
-    parser = get_default_enum_parser(path_to_info)
+    # parser = get_default_enum_parser(path_to_info)
+
+    # if custom_parser is not None:
+    #     first_parser = parser  # this assignment prevents infinite recursion
+    #     parser = lambda x: custom_parser(first_parser(x))  # type: ignore[misc] # noqa: E731
+
+    # nodetree_manager = NodeTreeManager(
+    #     session=session,
+    #     parser=parser,
+    #     path_to_info=path_to_info,
+    #     hide_kernel_prefix=hide_kernel_prefix,
+    # )
+
+    # return nodetree_manager.root
+
+    nodes = await session.get_nodes()
+    id_to_segment = {e.id: e for e in nodes}
+
+
+    parser = lambda x:x #get_default_enum_parser(path_to_info) # todo
 
     if custom_parser is not None:
         first_parser = parser  # this assignment prevents infinite recursion
         parser = lambda x: custom_parser(first_parser(x))  # type: ignore[misc] # noqa: E731
 
-    nodetree_manager = NodeTreeManager(
-        session=session,
-        parser=parser,
-        path_to_info=path_to_info,
+    tree_data = TreeData(
+        session=session, 
+        id_to_segment=id_to_segment, 
+        root_id=nodes[0].id,
         hide_kernel_prefix=hide_kernel_prefix,
-    )
-
-    return nodetree_manager.root
+        parser=parser
+        )
+    return tree_data.root

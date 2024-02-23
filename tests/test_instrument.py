@@ -56,7 +56,7 @@ async def test_connect_device_error(kernel_session):
 @pytest.mark.asyncio()
 async def test_underlying_server():
     instrument = Instrument(serial="dev1234", model_node=await get_mocked_node({}))
-    assert instrument.kernel_session == instrument._tree_manager.session
+    assert instrument.kernel_session == instrument._tree_data.session
 
 
 @pytest.mark.asyncio()

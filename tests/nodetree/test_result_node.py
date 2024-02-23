@@ -11,7 +11,7 @@ async def test_partial_get_result_node():
         {"/a/b/c/d": {}},
     )
     response = await node.a.b()
-    assert response.path_segments == ()
+    assert response.abstract_path_segments == ()
     response.a.b.c.d  # noqa: B018 # path valid
 
 
@@ -25,7 +25,7 @@ async def test_partial_get_result_node_multiple_subpaths():
     )
 
     response = await node.a()
-    assert response.path_segments == ()
+    assert response.abstract_path_segments == ()
     response.a.c  # noqa: B018 # path valid
     response.a.d  # noqa: B018 # path valid
 
@@ -152,7 +152,7 @@ async def test_partial_get_result_node_only_access_same_node_repeatedly():
 async def test_wildcard_get_result_node_basic_behavior():
     node = await get_mocked_node({"/a/b/c": {}})
     response = await node.a["*"].c()
-    assert response.path_segments == ()
+    assert response.abstract_path_segments == ()
     response.a.b.c  # noqa: B018
 
 
@@ -163,7 +163,7 @@ async def test_wildcard_get_result_node_hide_prefix():
         hide_kernel_prefix=True,
     )
     response = await node["*"].c()
-    assert response.path_segments == ("a",)
+    assert response.abstract_path_segments == ("a",)
     response.b.c  # noqa: B018
 
 

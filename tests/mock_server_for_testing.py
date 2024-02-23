@@ -10,8 +10,7 @@ from labone.mock.automatic_session_functionality import AutomaticSessionFunction
 from labone.mock.convert_to_add_nodes import list_nodes_info_to_get_nodes
 from labone.mock.entry_point import spawn_hpk_mock
 from labone.nodetree.entry_point import construct_nodetree
-from labone.nodetree.helper import split_path
-from labone.nodetree.new_node import Segment, create_node_tree
+
 
 if t.TYPE_CHECKING:
     from labone.core.value import AnnotatedValue
@@ -28,16 +27,16 @@ async def get_mocked_node(
 
     Use when testing calls to the server.
     """
+    assert False, "Implement funct. on mock first"
     functionality = AutomaticSessionFunctionality(nodes_to_info)
     session_mock = await spawn_hpk_mock(functionality)
     return (
-        await create_node_tree(session_mock, hide_kernel_prefix=hide_kernel_prefix)
-        # await construct_nodetree(
-        #     session_mock,
-        #     hide_kernel_prefix=hide_kernel_prefix,
-        #     custom_parser=custom_parser,
-        # )
-    ).root
+        await construct_nodetree(
+            session_mock,
+            hide_kernel_prefix=hide_kernel_prefix,
+            custom_parser=custom_parser,
+        )
+    )#.root
 
 
 async def get_unittest_mocked_node(
@@ -55,7 +54,7 @@ async def get_unittest_mocked_node(
     session_mock.list_nodes_info.return_value = (
         nodes_to_info  # required for construction
     )
-    session_mock.get_nodes.return_value = list_nodes_info_to_get_nodes(nodes_to_info)
+    session_mock.get_nodes.return_value = list_nodes_info_to_get_nodes(nodes_to_info) # required for construction
     return (
-        await create_node_tree(session_mock, hide_kernel_prefix=hide_kernel_prefix) #construct_nodetree(session_mock, hide_kernel_prefix=hide_kernel_prefix)
+        await construct_nodetree(session_mock, hide_kernel_prefix=hide_kernel_prefix)
     )

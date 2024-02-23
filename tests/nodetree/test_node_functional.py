@@ -17,14 +17,6 @@ from tests.mock_server_for_testing import get_mocked_node, get_unittest_mocked_n
 
 
 @pytest.mark.asyncio()
-async def test_node_single_dot_subpathing():
-    node = await get_unittest_mocked_node({"/a": {}})
-
-    #assert node.a.path == "/a"
-    assert node.a.path == "/a"
-
-
-@pytest.mark.asyncio()
 async def test_node_dot_subpathing():
     node = await get_unittest_mocked_node({"/a/b/c/d": {}})
 
@@ -112,22 +104,25 @@ async def test_root_property_hide_kernel_prefix():
 @pytest.mark.parametrize(
     "paths",
     [
-        set(),
-        {"/a"},
-        {"/a", "/c", "/b", "/d"},
+        {"/x/a"},
+        {"/x/a", "/x/c", "/x/b", "/x/d"},
     ],
 )
 @pytest.mark.asyncio()
 async def test_iterating_over_node(paths):
     node = await get_unittest_mocked_node({path: {} for path in paths})
-    assert {subnode.path for subnode in node} == paths
+    assert {subnode.path for subnode in node.x} == paths
 
+@pytest.mark.asyncio()
+async def test_iterating_over_node_without_children():
+    node = await get_unittest_mocked_node({"/x": {}})
+    assert {subnode.path for subnode in node.x} == set()
 
 @pytest.mark.asyncio()
 async def test_iterating_over_node_sorted():
-    paths = {"/a", "/c", "/b", "/d"}
+    paths = {"/x/a", "/x/c", "/x/b", "/x/d"}
     node = await get_unittest_mocked_node({path: {} for path in paths})
-    assert [subnode.path for subnode in node] == sorted(paths)
+    assert [subnode.path for subnode in node.x] == sorted(paths)
 
 
 @pytest.mark.asyncio()
@@ -148,7 +143,8 @@ async def test_contains_next_segment():
 
 @pytest.mark.asyncio()
 async def test_contains_subnode():
-    node = await get_unittest_mocked_node({"/a": {}, "/c/d": {}})
+    node = await get_unittest_mocked_node({"/x/a": {}, "/x/c/d": {}})
+    node = node.x
     assert node.a in node
     assert node.c in node
 
@@ -167,7 +163,8 @@ async def test_node_does_not_contain_deeper_child():
 
 @pytest.mark.asyncio()
 async def test_node_does_not_contain_other_path():
-    node = await get_unittest_mocked_node({"/a/b": {}, "/c/d": {}})
+    node = await get_unittest_mocked_node({"/x/a/b": {}, "/x/c/d": {}})
+    node = node.x
     assert node.c.d not in node.a
 
 
@@ -248,8 +245,8 @@ async def test_comparable():
 
 @pytest.mark.asyncio()
 async def test_hashing():
-    node = await get_unittest_mocked_node({"/a/b": {}, "/c/d": {}, "/e/f": {}})
-    nodes = [node.a.b, node.c.d, node.e.f]
+    node = await get_unittest_mocked_node({"/x/a/b": {}, "/x/c/d": {}, "/x/e/f": {}})
+    nodes = [node.x.a.b, node.x.c.d, node.x.e.f]
 
     # lossless hashing
     assert sorted(set(nodes)) == sorted(nodes)
@@ -329,3 +326,9 @@ async def test_adding_nodes_manually_hidden_prefix_does_only_change_if_required(
     # is still possible
     node.tree_manager.add_nodes(["/common_prefix/c"])
     assert subnode_via_hidden_prefix == node.b
+
+
+# is it required to support trees with multiple roots?
+# e.g.: /a and /c
+    
+# is it required to support empty trees?
