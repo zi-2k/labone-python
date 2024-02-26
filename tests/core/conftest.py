@@ -22,8 +22,10 @@ async def kj_loop():
     This helps to avoid leaking errors and promises from one test to another.
     """
     loop_manager = await LoopManager.create()
-    yield
-    await loop_manager.destroy()
+    try:
+        yield
+    finally:
+        await loop_manager.destroy()
 
 
 class MockReflectionServer:
