@@ -359,24 +359,11 @@ class Session:
             ...     flags=ListNodesFlags.RECURSIVE | ListNodesFlags.EXCLUDE_VECTORS
             ... )
         """
-        request = self._session.listNodes_request()
-        try:
-            request.pathExpression = path
-        except Exception:  # noqa: BLE001
-            msg = "`path` must be a string."
-            raise TypeError(msg)  # noqa: TRY200, B904
-        try:
-            request.flags = int(flags)
-        except capnp.KjException:
-            field_type = request_field_type_description(request, "flags")
-            msg = f"`flags` value is out-of-bounds, it must be of type {field_type}."
-            raise ValueError(
-                msg,
-            ) from None
-        except (TypeError, ValueError):
-            msg = "`flags` must be an integer."
-            raise TypeError(msg) from None
-        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
+        async with self._capnp_lock.lock():
+            response = await self._session.listNodes(
+                path,
+                int(flags),
+            )
         return list(response.paths)
 
     @clean_exception_stack
@@ -458,24 +445,10 @@ class Session:
                 }
             }
         """
-        request = self._session.listNodesJson_request()
-        try:
-            request.pathExpression = path
-        except Exception:  # noqa: BLE001
-            msg = "`path` must be a string."
-            raise TypeError(msg) from None
-        try:
-            request.flags = int(flags)
-        except capnp.KjException:
-            field_type = request_field_type_description(request, "flags")
-            msg = f"`flags` value is out-of-bounds, it must be of type {field_type}."
-            raise ValueError(
-                msg,
-            ) from None
-        except (TypeError, ValueError):
-            msg = "`flags` must be an integer."
-            raise TypeError(msg) from None
-        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
+        response = await self._session.listNodesJson(
+            path,
+            int(flags),
+        )
         return json.loads(response.nodeProps)
 
     @clean_exception_stack
@@ -506,14 +479,12 @@ class Session:
                 mapped to one of the other errors.
         """
         capnp_value = value.to_capnp(reflection=self._reflection_server)
-        request = self._session.setValue_request()
-        request.pathExpression = capnp_value.metadata.path
-        request.value = capnp_value.value
-        request.lookupMode = (
-            self._reflection_server.LookupMode.directLookup  # type: ignore[attr-defined]
+        response = await self._session.setValue(
+            capnp_value.metadata.path,
+            capnp_value.value,
+            self._reflection_server.LookupMode.directLookup,
+            client=self._client_id.bytes
         )
-        request.client = self._client_id.bytes
-        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
         try:
             return AnnotatedValue.from_capnp(result.unwrap(response.result[0]))
         except IndexError as e:
@@ -558,12 +529,12 @@ class Session:
                 mapped to one of the other errors.
         """
         capnp_value = value.to_capnp(reflection=self._reflection_server)
-        request = self._session.setValue_request()
-        request.pathExpression = capnp_value.metadata.path
-        request.value = capnp_value.value
-        request.lookupMode = self._reflection_server.LookupMode.withExpansion  # type: ignore[attr-defined]
-        request.client = self._client_id.bytes
-        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
+        response = await self._session.setValue(
+            capnp_value.metadata.path,
+            capnp_value.value,
+            self._reflection_server.LookupMode.withExpansion,
+            client=self._client_id.bytes
+        )
         return [
             AnnotatedValue.from_capnp(result.unwrap(raw_result))
             for raw_result in response.result
@@ -603,16 +574,11 @@ class Session:
             LabOneCoreError: If something else went wrong that can not be
                 mapped to one of the other errors.
         """
-        request = self._session.getValue_request()
-        try:
-            request.pathExpression = path
-        except (AttributeError, TypeError, capnp.KjException) as error:
-            field_type = request_field_type_description(request, "pathExpression")
-            msg = f"`path` attribute must be of type {field_type}."
-            raise TypeError(msg) from error
-        request.lookupMode = self._reflection_server.LookupMode.directLookup  # type: ignore[attr-defined]
-        request.client = self._client_id.bytes
-        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
+        response = await self._session.getValue(
+            path,
+            self._reflection_server.LookupMode.directLookup,
+            client=self._client_id.bytes
+        )
         try:
             return AnnotatedValue.from_capnp(result.unwrap(response.result[0]))
         except IndexError as e:
@@ -662,17 +628,11 @@ class Session:
             LabOneCoreError: If something else went wrong that can not be
                 mapped to one of the other errors.
         """
-        request = self._session.getValue_request()
-        try:
-            request.pathExpression = path_expression
-        except (AttributeError, TypeError, capnp.KjException) as error:
-            field_type = request_field_type_description(request, "pathExpression")
-            msg = f"`path` attribute must be of type {field_type}."
-            raise TypeError(msg) from error
-        request.lookupMode = self._reflection_server.LookupMode.withExpansion  # type: ignore[attr-defined]
-        request.flags = int(flags)
-        request.client = self._client_id.bytes
-        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
+        response = await self._session.getValue(
+            path_expression,
+            self._reflection_server.LookupMode.withExpansion,
+            client=self._client_id.bytes,
+        )
         return [
             AnnotatedValue.from_capnp(result.unwrap(raw_result))
             for raw_result in response.result
@@ -770,14 +730,16 @@ class Session:
             field_type = request_field_type_description(subscription, "path")
             msg = f"`path` attribute must be of type {field_type}."
             raise TypeError(msg) from None
-        request = self._session.subscribe_request()
-        request.subscription = subscription
+        # request = self._session.subscribe_request()
+        # request.subscription = subscription
 
         if get_initial_value:
-            response, initial_value = await asyncio.gather(
-                _send_and_wait_request(request, capnp_lock=self._capnp_lock),
-                self.get(path),
-            )
+            async with self._capnp_lock.lock():
+                response, initial_value = await asyncio.gather(
+                    # _send_and_wait_request(request, capnp_lock=self._capnp_lock),
+                    self._session.subscribe(subscription),
+                    self.get(path),
+                )
             unwrap(response.result)  # Result(Void, Error)
             new_queue_type = queue_type or DataQueue
             queue = new_queue_type(
@@ -786,7 +748,8 @@ class Session:
             )
             queue.put_nowait(initial_value)
             return queue
-        response = await _send_and_wait_request(request, capnp_lock=self._capnp_lock)
+        async with self._capnp_lock.lock():
+            response = await self._session.subscribe(subscription)
         unwrap(response.result)  # Result(Void, Error)
         new_queue_type = queue_type or DataQueue
         return new_queue_type(
