@@ -132,3 +132,65 @@ async def start_local_mock(
     writer = await capnp.AsyncIoStream.create_connection(sock=write)
     # create server for the local socket pair
     return capnp_server_factory(writer, schema, mock), reader
+
+
+async def spawn_hpk_mock(schema: CapnpStructReader, mock: ServerTemplate, port: int):
+    await ensure_capnp_event_loop()
+
+    async def new_connection(stream):
+        print("new connection")
+        schema_parsed_dict = schema.to_dict()
+        parsed_schema = ParsedWireSchema(schema.theSchema)
+        capnp_interface = capnp.lib.capnp._InterfaceModule(  # noqa: SLF001
+            parsed_schema.full_schema[mock.server_id].schema.as_interface(),
+            parsed_schema.full_schema[mock.server_id].name,
+        )
+
+        class MockServerImpl(capnp_interface.Server):  # type: ignore[name-defined]
+            """Dynamically created capnp server.
+
+            Redirects all calls (except getTheSchema) to the concrete server implementation.
+            """
+
+            def __init__(self) -> None:
+                self._mock = mock
+                # parsed schema needs to stay alive as long as the server is.
+                self._parsed_schema = parsed_schema
+
+            def __getattr__(
+                self,
+                name: str,
+            ) -> _DynamicStructBuilder | list[_DynamicStructBuilder] | str | list[str]:
+                """Redirecting all calls to the concrete server implementation."""
+                if hasattr(self._mock, name):
+                    return getattr(self._mock, name)
+                return getattr(super(), name)
+
+            async def getTheSchema(  # noqa: N802
+                self,
+                _context: _CallContext,
+                **kwargs,  # noqa: ARG002
+            ) -> _DynamicStructBuilder:
+                """Reflection: Capnp method to get the schema.
+
+                Will be called by capnp as reaction to a getTheSchema request.
+                Do not call this method directly.
+
+                Args:
+                    _context: Capnp context.
+                    kwargs: Additional arguments.
+
+                Returns:
+                    The parsed schema as a capnp object.
+                """
+                # Use `from_dict` to benefit from pycapnp lifetime management
+                # Otherwise the underlying capnp object need to be copied manually to avoid
+                # segfaults
+                _context.results.theSchema.from_dict(schema_parsed_dict)
+                _context.results.theSchema.typeId = mock.type_id
+
+        await capnp.TwoPartyServer(stream, bootstrap=MockServerImpl()).on_disconnect()
+
+    server = await capnp.AsyncIoStream.create_server(new_connection, "0.0.0.0", port)
+    async with server:
+        await server.serve_forever()
